@@ -1,0 +1,15 @@
+__pycache__
+.pytest_cache
+.venv
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.cache
+dist
+build
+.DS_Store
+.idea
+audio
+outputs
