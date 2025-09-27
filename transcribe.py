@@ -4,6 +4,8 @@ import json
 import os
 import sys
 from datetime import timedelta
+import time
+import math
 
 from faster_whisper import WhisperModel
 
@@ -115,6 +117,18 @@ def parse_args() -> argparse.Namespace:
         help="Beam size for decoding",
     )
     parser.add_argument(
+        "--progress",
+        action="store_true",
+        default=os.getenv("PROGRESS") in {"1", "true", "yes", "on"},
+        help="Show rough progress updates during transcription",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=float(os.getenv("PROGRESS_INTERVAL", 1.0)),
+        help="Seconds between progress updates (non-TTY)",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         help="Write output to file path (otherwise prints to stdout)",
@@ -145,6 +159,17 @@ def vtt_timestamp(seconds: float) -> str:
     secs = total_seconds % 60
     millis = int(round((td.total_seconds() - total_seconds) * 1000))
     return f"{hours:02}:{minutes:02}:{secs:02}.{millis:03}"
+
+
+def hms(seconds: float) -> str:
+    if seconds is None:
+        seconds = 0.0
+    seconds = max(0.0, float(seconds))
+    total = int(seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02}:{m:02}:{s:02}"
 
 
 def _group_paragraphs(segments, *, max_gap: float, max_sec: float, min_chars: int, by_speaker: bool):
@@ -276,6 +301,7 @@ def main() -> int:
         file=sys.stderr,
     )
 
+    t0 = time.time()
     segments, info = model.transcribe(
         args.input,
         language=args.language,
@@ -286,8 +312,57 @@ def main() -> int:
         condition_on_previous_text=True,
     )
 
-    # Collect segments into a list to format/output more than once if needed
-    seg_list = list(segments)
+    # Lightweight segment holder that allows attaching 'speaker'
+    class OutSeg:
+        __slots__ = ("start", "end", "text", "speaker")
+        def __init__(self, start, end, text, speaker=None):
+            self.start = start
+            self.end = end
+            self.text = text
+            self.speaker = speaker
+
+    # Consume segments with optional progress display
+    seg_list = []
+    max_end = 0.0
+    total_dur = float(getattr(info, "duration", 0.0) or 0.0)
+    is_tty = sys.stderr.isatty()
+    last_emit = 0.0
+
+    def emit_progress(force=False):
+        nonlocal last_emit
+        if not args.progress or total_dur <= 0:
+            return
+        now = time.time()
+        if not force and not is_tty and (now - last_emit) < args.progress_interval:
+            return
+        progress = min(1.0, max_end / total_dur if total_dur > 0 else 0.0)
+        elapsed = now - t0
+        speed = (max_end / elapsed) if elapsed > 0 else 0.0
+        remaining = (total_dur - max_end) / speed if speed > 0 else float('inf')
+        percent = int(progress * 100)
+        eta_str = hms(remaining) if math.isfinite(remaining) else "??:??:??"
+        msg = f"[{percent:3d}%] {hms(max_end)}/{hms(total_dur)} ETA {eta_str}"
+        if is_tty:
+            sys.stderr.write("\r" + msg)
+            sys.stderr.flush()
+        else:
+            print(msg, file=sys.stderr)
+        last_emit = now
+
+    for seg in segments:
+        out = OutSeg(seg.start, seg.end, seg.text)
+        seg_list.append(out)
+        try:
+            if out.end is not None:
+                max_end = max(max_end, float(out.end))
+                emit_progress()
+        except Exception:
+            pass
+
+    emit_progress(force=True)
+    if is_tty and args.progress:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
     # Optional speaker diarization
     diarized = False
@@ -350,8 +425,8 @@ def main() -> int:
                     best_ov = ov
                     best_label = d["speaker"]
             if best_label is not None:
-                # Attach an attribute dynamically for downstream formatting
-                setattr(seg, "speaker", speaker_map[best_label])
+                # Attach label for downstream formatting
+                seg.speaker = speaker_map[best_label]
                 diarized = True
 
     output_text = format_output(

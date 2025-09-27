@@ -9,6 +9,7 @@ Features
 - Outputs: plain text, SRT, VTT, or JSON.
 - Optional VAD filtering for cleaner segments.
  - Optional speaker diarization (pyannote) and readable paragraph formatting.
+ - Progress estimates during transcription with ETA.
 
 Build
 - Build with model pre-cache (default `small`):
@@ -39,6 +40,7 @@ Makefile
 - Other examples:
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.srt" FORMAT=srt VAD=1
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.json" FORMAT=json MODEL=small LANG=ru
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt PROGRESS=1 PROGRESS_INTERVAL=2
 
 Speakers (Diarization)
 - Enable speaker labels with pyannote (CPU, slower, large deps):
@@ -54,6 +56,7 @@ Speakers (Diarization)
   - You need a Hugging Face token with access to `pyannote/speaker-diarization-3.1`.
   - By default, TXT is formatted into readable paragraphs; set `TXT_GROUPING=segments` for line-per-segment or `TXT_GROUPING=none` for a single line.
   - Tweak paragraphing via `MAX_GAP` (default 1.0s), `MAX_PARAGRAPH_SECONDS` (30s), and `MIN_PARAGRAPH_CHARS` (80).
+  - Progress prints to stderr. In non-interactive runs it emits periodic lines; in a TTY it updates a single line with percentage and ETA.
 
 Notes
 - The first run downloads model weights to the container cache (unless pre-cached at build time). Subsequent runs are faster.

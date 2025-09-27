@@ -12,6 +12,8 @@ COMPUTE ?= int8
 BEAM ?= 5
 UID ?= $(shell id -u)
 GID ?= $(shell id -g)
+PROGRESS ?= 1
+PROGRESS_INTERVAL ?= 1.0
 SPEAKERS ?=
 HF_TOKEN ?=
 DIARIZE_MODEL ?= pyannote/speaker-diarization-3.1
@@ -35,11 +37,12 @@ transcribe:
 	docker run --rm -u $(UID):$(GID) -v "$(CURDIR)":/app \
 		-e HF_HOME=/app/.cache/huggingface -e XDG_CACHE_HOME=/app/.cache -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
 		-e TXT_GROUPING=$(TXT_GROUPING) -e MAX_GAP=$(MAX_GAP) -e MAX_PARAGRAPH_SECONDS=$(MAX_PARAGRAPH_SECONDS) -e MIN_PARAGRAPH_CHARS=$(MIN_PARAGRAPH_CHARS) \
+		-e PROGRESS=$(PROGRESS) -e PROGRESS_INTERVAL=$(PROGRESS_INTERVAL) \
 		$(if $(HF_TOKEN),-e HF_TOKEN=$(HF_TOKEN),) \
 		$(IMAGE) \
 		"/app/$(FILE)" \
 		--language $(LANG) --model $(MODEL) --compute-type $(COMPUTE) --beam-size $(BEAM) \
-		$(if $(VAD),--vad,) $(if $(SPEAKERS),--diarize --diarize-model $(DIARIZE_MODEL) $(if $(NUM_SPEAKERS),--num-speakers $(NUM_SPEAKERS),),) --format $(FORMAT) -o "/app/$(OUT)"
+		$(if $(VAD),--vad,) $(if $(SPEAKERS),--diarize --diarize-model $(DIARIZE_MODEL) $(if $(NUM_SPEAKERS),--num-speakers $(NUM_SPEAKERS),),) $(if $(PROGRESS),--progress --progress-interval $(PROGRESS_INTERVAL),) --format $(FORMAT) -o "/app/$(OUT)"
 
 help:
 	@echo "Usage:"
