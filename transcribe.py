@@ -7,6 +7,12 @@ from datetime import timedelta
 
 from faster_whisper import WhisperModel
 
+try:
+    # Optional, only used when --diarize is set
+    from pyannote.audio import Pipeline as PyannotePipeline  # type: ignore
+except Exception:  # pragma: no cover
+    PyannotePipeline = None  # lazy import guard
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -46,6 +52,56 @@ def parse_args() -> argparse.Namespace:
         choices=["txt", "srt", "vtt", "json"],
         default="txt",
         help="Output format",
+    )
+    parser.add_argument(
+        "--txt-grouping",
+        choices=["none", "segments", "paragraphs"],
+        default=os.getenv("TXT_GROUPING", "paragraphs"),
+        help="How to group TXT output: single line, per segment, or paragraphs",
+    )
+    parser.add_argument(
+        "--max-gap",
+        type=float,
+        default=float(os.getenv("MAX_GAP", 1.0)),
+        help="New paragraph if gap between segments exceeds seconds",
+    )
+    parser.add_argument(
+        "--max-paragraph-seconds",
+        type=float,
+        default=float(os.getenv("MAX_PARAGRAPH_SECONDS", 30.0)),
+        help="Soft cap for paragraph duration; allows break after sentence end",
+    )
+    parser.add_argument(
+        "--min-paragraph-chars",
+        type=int,
+        default=int(os.getenv("MIN_PARAGRAPH_CHARS", 80)),
+        help="Prefer break after sentence if paragraph has at least this length",
+    )
+    parser.add_argument(
+        "--diarize",
+        action="store_true",
+        help="Enable speaker diarization using pyannote (requires HF token)",
+    )
+    parser.add_argument(
+        "--diarize-model",
+        default=os.getenv("DIARIZE_MODEL", "pyannote/speaker-diarization-3.1"),
+        help="Pyannote diarization pipeline name",
+    )
+    parser.add_argument(
+        "--num-speakers",
+        type=int,
+        default=(int(os.getenv("NUM_SPEAKERS")) if os.getenv("NUM_SPEAKERS") else None),
+        help="Fix the number of speakers for diarization (e.g., 2)",
+    )
+    parser.add_argument(
+        "--hf-token",
+        default=os.getenv("HF_TOKEN"),
+        help="Hugging Face access token (env HF_TOKEN) for gated diarization models",
+    )
+    parser.add_argument(
+        "--speaker-prefix",
+        default=os.getenv("SPEAKER_PREFIX", "Speaker"),
+        help="Prefix for speaker labels in output (e.g. 'Speaker', 'SPK')",
     )
     parser.add_argument(
         "--vad",
@@ -91,12 +147,71 @@ def vtt_timestamp(seconds: float) -> str:
     return f"{hours:02}:{minutes:02}:{secs:02}.{millis:03}"
 
 
-def format_output(segments, fmt: str):
+def _group_paragraphs(segments, *, max_gap: float, max_sec: float, min_chars: int, by_speaker: bool):
+    groups = []
+    current = None
+    punct = ".?!…"
+
+    for seg in segments:
+        if not seg.text or not seg.text.strip():
+            continue
+        gap = 0.0
+        if current is not None:
+            gap = max(0.0, (seg.start or 0.0) - (current["end"] or 0.0))
+
+        start_new = False
+        if current is None:
+            start_new = True
+        else:
+            if by_speaker and (getattr(seg, "speaker", None) != current.get("speaker")):
+                start_new = True
+            elif gap > max_gap:
+                start_new = True
+            else:
+                duration = (current["end"] or 0.0) - (current["start"] or 0.0)
+                ends_with_sentence = current["text"].rstrip().endswith(tuple(punct))
+                if ends_with_sentence and (len(current["text"]) >= min_chars or duration >= max_sec):
+                    start_new = True
+
+        if start_new:
+            current = {
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip(),
+                "speaker": getattr(seg, "speaker", None),
+            }
+            groups.append(current)
+        else:
+            current["end"] = seg.end
+            if current["text"]:
+                # Keep natural spacing; avoid double spaces
+                if not current["text"].endswith(" "):
+                    current["text"] += " "
+            current["text"] += seg.text.strip()
+
+    return groups
+
+
+def format_output(segments, fmt: str, *, txt_grouping: str, max_gap: float, max_sec: float, min_chars: int, diarized: bool, speaker_prefix: str):
     if fmt == "txt":
-        texts = []
-        for seg in segments:
-            texts.append(seg.text.strip())
-        return " ".join(t for t in texts if t)
+        if txt_grouping == "none":
+            return " ".join(seg.text.strip() for seg in segments if seg.text and seg.text.strip())
+        elif txt_grouping == "segments":
+            lines = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
+            return "\n".join(lines) + ("\n" if lines else "")
+        else:  # paragraphs
+            groups = _group_paragraphs(
+                segments,
+                max_gap=max_gap,
+                max_sec=max_sec,
+                min_chars=min_chars,
+                by_speaker=diarized,
+            )
+            lines = []
+            for g in groups:
+                prefix = f"{speaker_prefix} {g['speaker']}: " if diarized and g.get("speaker") is not None else ""
+                lines.append(prefix + g["text"].strip())
+            return "\n\n".join(lines) + ("\n" if lines else "")
     elif fmt == "srt":
         lines = []
         idx = 1
@@ -104,6 +219,8 @@ def format_output(segments, fmt: str):
             start = srt_timestamp(seg.start)
             end = srt_timestamp(seg.end)
             text = seg.text.strip()
+            if diarized and getattr(seg, "speaker", None) is not None:
+                text = f"{speaker_prefix} {seg.speaker}: " + text
             if not text:
                 continue
             lines.append(str(idx))
@@ -118,6 +235,8 @@ def format_output(segments, fmt: str):
             start = vtt_timestamp(seg.start)
             end = vtt_timestamp(seg.end)
             text = seg.text.strip()
+            if diarized and getattr(seg, "speaker", None) is not None:
+                text = f"{speaker_prefix} {seg.speaker}: " + text
             if not text:
                 continue
             lines.append(f"{start} --> {end}")
@@ -125,11 +244,14 @@ def format_output(segments, fmt: str):
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
     elif fmt == "json":
-        data = [
-            {"start": seg.start, "end": seg.end, "text": seg.text}
-            for seg in segments
-            if seg.text and seg.text.strip()
-        ]
+        data = []
+        for seg in segments:
+            if not seg.text or not seg.text.strip():
+                continue
+            item = {"start": seg.start, "end": seg.end, "text": seg.text}
+            if diarized and getattr(seg, "speaker", None) is not None:
+                item["speaker"] = str(seg.speaker)
+            data.append(item)
         return json.dumps(data, ensure_ascii=False, indent=2)
     else:
         raise ValueError(f"Unsupported format: {fmt}")
@@ -167,7 +289,81 @@ def main() -> int:
     # Collect segments into a list to format/output more than once if needed
     seg_list = list(segments)
 
-    output_text = format_output(seg_list, args.format)
+    # Optional speaker diarization
+    diarized = False
+    if args.diarize:
+        if PyannotePipeline is None:
+            print("pyannote.audio not installed; diarization unavailable.", file=sys.stderr)
+            return 2
+        if not args.hf_token:
+            print("Diarization requires a Hugging Face token. Set HF_TOKEN or pass --hf-token.", file=sys.stderr)
+            return 2
+        print("Running speaker diarization (pyannote)...", file=sys.stderr)
+        try:
+            pipeline = PyannotePipeline.from_pretrained(args.diarize_model, use_auth_token=args.hf_token)
+            # Use explicit file mapping to support a wide range of formats
+            call_kwargs = {}
+            if args.num_speakers is not None:
+                call_kwargs["num_speakers"] = int(args.num_speakers)
+            diar = pipeline({"audio": args.input}, **call_kwargs)
+        except Exception as e:
+            print(f"Diarization failed: {e}", file=sys.stderr)
+            return 2
+
+        # Build list of diarization segments with labels
+        diar_segs = []
+        try:
+            for turn, _, speaker in diar.itertracks(yield_label=True):
+                diar_segs.append({
+                    "start": float(turn.start),
+                    "end": float(turn.end),
+                    "speaker": str(speaker),
+                })
+        except Exception:
+            # Backwards compatibility if API differs
+            for segment, _, label in diar.itertracks(yield_label=True):
+                diar_segs.append({
+                    "start": float(getattr(segment, "start", 0.0)),
+                    "end": float(getattr(segment, "end", 0.0)),
+                    "speaker": str(label),
+                })
+
+        # Normalize speaker labels to integers starting at 1 for nicer display
+        speaker_map = {}
+        next_id = 1
+        for d in diar_segs:
+            if d["speaker"] not in speaker_map:
+                speaker_map[d["speaker"]] = next_id
+                next_id += 1
+
+        # Assign speaker to each whisper segment via maximum overlap
+        def overlap(a_start, a_end, b_start, b_end):
+            return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+        for seg in seg_list:
+            best_label = None
+            best_ov = 0.0
+            s0, s1 = float(seg.start or 0.0), float(seg.end or 0.0)
+            for d in diar_segs:
+                ov = overlap(s0, s1, d["start"], d["end"])
+                if ov > best_ov:
+                    best_ov = ov
+                    best_label = d["speaker"]
+            if best_label is not None:
+                # Attach an attribute dynamically for downstream formatting
+                setattr(seg, "speaker", speaker_map[best_label])
+                diarized = True
+
+    output_text = format_output(
+        seg_list,
+        args.format,
+        txt_grouping=args.txt_grouping,
+        max_gap=args.max_gap,
+        max_sec=args.max_paragraph_seconds,
+        min_chars=args.min_paragraph_chars,
+        diarized=diarized,
+        speaker_prefix=args.speaker_prefix,
+    )
 
     if args.output:
         out_path = args.output
@@ -187,4 +383,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

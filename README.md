@@ -8,6 +8,7 @@ Features
 - CPU-friendly with INT8 quantization for speed.
 - Outputs: plain text, SRT, VTT, or JSON.
 - Optional VAD filtering for cleaner segments.
+ - Optional speaker diarization (pyannote) and readable paragraph formatting.
 
 Build
 - Build with model pre-cache (default `small`):
@@ -38,6 +39,21 @@ Makefile
 - Other examples:
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.srt" FORMAT=srt VAD=1
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.json" FORMAT=json MODEL=small LANG=ru
+
+Speakers (Diarization)
+- Enable speaker labels with pyannote (CPU, slower, large deps):
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt SPEAKERS=1 HF_TOKEN=hf_your_token
+
+- SRT/VTT with speakers (prefixes captions with speaker):
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.srt" FORMAT=srt SPEAKERS=1 HF_TOKEN=hf_your_token
+
+- Force exactly two speakers:
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt SPEAKERS=1 NUM_SPEAKERS=2 HF_TOKEN=hf_your_token
+
+- Notes:
+  - You need a Hugging Face token with access to `pyannote/speaker-diarization-3.1`.
+  - By default, TXT is formatted into readable paragraphs; set `TXT_GROUPING=segments` for line-per-segment or `TXT_GROUPING=none` for a single line.
+  - Tweak paragraphing via `MAX_GAP` (default 1.0s), `MAX_PARAGRAPH_SECONDS` (30s), and `MIN_PARAGRAPH_CHARS` (80).
 
 Notes
 - The first run downloads model weights to the container cache (unless pre-cached at build time). Subsequent runs are faster.

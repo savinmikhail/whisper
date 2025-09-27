@@ -18,7 +18,7 @@ WORKDIR /app
 # System deps: ffmpeg for audio decoding, and basic certificates
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg ca-certificates \
+       ffmpeg ca-certificates libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
