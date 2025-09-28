@@ -33,9 +33,12 @@ build:
 transcribe:
 	@test -n "$(FILE)" || (echo "Error: set FILE=path/to/input audio" && exit 1)
 	@test -n "$(OUT)" || (echo "Error: set OUT=path/to/output file" && exit 1)
-	@mkdir -p "$(dir $(OUT))"
-	docker run --rm -u $(UID):$(GID) -v "$(CURDIR)":/app \
-		-e HF_HOME=/app/.cache/huggingface -e XDG_CACHE_HOME=/app/.cache -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
+	@mkdir -p "$(dir $(OUT))" \
+		"$(CURDIR)/.cache/huggingface" "$(CURDIR)/.cache/matplotlib" "$(CURDIR)/.cache/torch" "$(CURDIR)/.cache/pyannote" "$(CURDIR)/.config/matplotlib"
+	@docker run --rm -u $(UID):$(GID) -v "$(CURDIR)":/app \
+		-e HOME=/app -e XDG_CONFIG_HOME=/app/.config \
+		-e HF_HOME=/app/.cache/huggingface -e HUGGINGFACE_HUB_CACHE=/app/.cache/huggingface -e XDG_CACHE_HOME=/app/.cache -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
+		-e PYANNOTE_CACHE=/app/.cache/pyannote -e TORCH_HOME=/app/.cache/torch -e MPLCONFIGDIR=/app/.cache/matplotlib \
 		-e TXT_GROUPING=$(TXT_GROUPING) -e MAX_GAP=$(MAX_GAP) -e MAX_PARAGRAPH_SECONDS=$(MAX_PARAGRAPH_SECONDS) -e MIN_PARAGRAPH_CHARS=$(MIN_PARAGRAPH_CHARS) \
 		-e PROGRESS=$(PROGRESS) -e PROGRESS_INTERVAL=$(PROGRESS_INTERVAL) \
 		$(if $(HF_TOKEN),-e HF_TOKEN=$(HF_TOKEN),) \

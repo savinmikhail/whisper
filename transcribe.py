@@ -6,14 +6,11 @@ import sys
 from datetime import timedelta
 import time
 import math
+import subprocess
+import tempfile
+import shlex
 
 from faster_whisper import WhisperModel
-
-try:
-    # Optional, only used when --diarize is set
-    from pyannote.audio import Pipeline as PyannotePipeline  # type: ignore
-except Exception:  # pragma: no cover
-    PyannotePipeline = None  # lazy import guard
 
 
 def parse_args() -> argparse.Namespace:
@@ -367,12 +364,44 @@ def main() -> int:
     # Optional speaker diarization
     diarized = False
     if args.diarize:
-        if PyannotePipeline is None:
-            print("pyannote.audio not installed; diarization unavailable.", file=sys.stderr)
-            return 2
         if not args.hf_token:
             print("Diarization requires a Hugging Face token. Set HF_TOKEN or pass --hf-token.", file=sys.stderr)
             return 2
+        try:
+            from pyannote.audio import Pipeline as PyannotePipeline  # type: ignore
+        except Exception as e:
+            print(f"Diarization unavailable: failed to import pyannote.audio: {e}", file=sys.stderr)
+            print("Try rebuilding image, or run: python -c 'import pyannote.audio' inside the container to see details.", file=sys.stderr)
+            return 2
+        # Ensure audio is in a format pyannote/torchaudio can read reliably (WAV)
+        # Many containers (e.g., MP4/AAC) are not supported by soundfile backend.
+        audio_path = args.input
+        cleanup = None
+        if not str(audio_path).lower().endswith((".wav", ".flac", ".ogg")):
+            try:
+                tmp = tempfile.NamedTemporaryFile(prefix="pyannote_audio_", suffix=".wav", delete=False)
+                tmp_path = tmp.name
+                tmp.close()
+                cmd = [
+                    "ffmpeg", "-y", "-i", audio_path, "-vn",
+                    "-ac", "1", "-ar", "16000", "-f", "wav", tmp_path,
+                ]
+                print("Preparing audio for diarization (ffmpeg -> wav)...", file=sys.stderr)
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0:
+                    print("ffmpeg failed to extract audio for diarization:", file=sys.stderr)
+                    try:
+                        err_txt = proc.stderr.decode("utf-8", errors="ignore")
+                    except Exception:
+                        err_txt = str(proc.stderr)
+                    print(err_txt, file=sys.stderr)
+                    return 2
+                audio_path = tmp_path
+                cleanup = tmp_path
+            except Exception as e:
+                print(f"Failed to prepare audio for diarization: {e}", file=sys.stderr)
+                return 2
+
         print("Running speaker diarization (pyannote)...", file=sys.stderr)
         try:
             pipeline = PyannotePipeline.from_pretrained(args.diarize_model, use_auth_token=args.hf_token)
@@ -380,9 +409,14 @@ def main() -> int:
             call_kwargs = {}
             if args.num_speakers is not None:
                 call_kwargs["num_speakers"] = int(args.num_speakers)
-            diar = pipeline({"audio": args.input}, **call_kwargs)
+            diar = pipeline({"audio": audio_path}, **call_kwargs)
         except Exception as e:
             print(f"Diarization failed: {e}", file=sys.stderr)
+            if cleanup:
+                try:
+                    os.unlink(cleanup)
+                except Exception:
+                    pass
             return 2
 
         # Build list of diarization segments with labels
@@ -428,6 +462,11 @@ def main() -> int:
                 # Attach label for downstream formatting
                 seg.speaker = speaker_map[best_label]
                 diarized = True
+        if cleanup:
+            try:
+                os.unlink(cleanup)
+            except Exception:
+                pass
 
     output_text = format_output(
         seg_list,

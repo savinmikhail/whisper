@@ -54,6 +54,7 @@ Speakers (Diarization)
 
 - Notes:
   - You need a Hugging Face token with access to `pyannote/speaker-diarization-3.1`.
+  - When diarization is enabled, the script extracts audio to a temporary 16kHz mono WAV via ffmpeg for compatibility (MP4/AAC is not directly supported by the default backend).
   - By default, TXT is formatted into readable paragraphs; set `TXT_GROUPING=segments` for line-per-segment or `TXT_GROUPING=none` for a single line.
   - Tweak paragraphing via `MAX_GAP` (default 1.0s), `MAX_PARAGRAPH_SECONDS` (30s), and `MIN_PARAGRAPH_CHARS` (80).
   - Progress prints to stderr. In non-interactive runs it emits periodic lines; in a TTY it updates a single line with percentage and ETA.
