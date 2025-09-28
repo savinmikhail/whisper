@@ -43,6 +43,9 @@ Makefile
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt PROGRESS=1 PROGRESS_INTERVAL=2
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt WARN=0   # suppress deprecation/info warnings
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt TTY=1    # single-line updating progress
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt SPEAKERS=1 NUM_SPEAKERS=2 DIARIZE_RTF=0.35  # better diarization ETA
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt SPEAKERS=1 NUM_SPEAKERS=2 DIARIZE_PROGRESS=elapsed  # elapsed-only diarization progress
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt TXT_TIMESTAMPS=start  # add [mm:ss] before each paragraph
 
 Speakers (Diarization)
 - Enable speaker labels with pyannote (CPU, slower, large deps):
@@ -57,6 +60,8 @@ Speakers (Diarization)
 - Notes:
   - You need a Hugging Face token with access to `pyannote/speaker-diarization-3.1`.
   - When diarization is enabled, the script extracts audio to a temporary 16kHz mono WAV via ffmpeg for compatibility (MP4/AAC is not directly supported by the default backend).
+  - Diarization progress: default is elapsed-only via `DIARIZE_PROGRESS=elapsed`. For ETA-based estimates, set `DIARIZE_PROGRESS=estimate` (optionally add `DIARIZE_RTF=0.35`). Set `DIARIZE_PROGRESS=off` to hide it.
+  - Time marks in TXT: controlled by `TXT_TIMESTAMPS` (`off`, `start`, `range`). The Makefile defaults to `start`, producing lines like `[03:28] Speaker 1: …`.
   - By default, TXT is formatted into readable paragraphs; set `TXT_GROUPING=segments` for line-per-segment or `TXT_GROUPING=none` for a single line.
   - Tweak paragraphing via `MAX_GAP` (default 1.0s), `MAX_PARAGRAPH_SECONDS` (30s), and `MIN_PARAGRAPH_CHARS` (80).
   - To hide noisy library warnings, use `WARN=0` (default). To see them for debugging, set `WARN=1`.

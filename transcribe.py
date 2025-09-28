@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         help="How to group TXT output: single line, per segment, or paragraphs",
     )
     parser.add_argument(
+        "--txt-timestamps",
+        choices=["off", "start", "range"],
+        default=os.getenv("TXT_TIMESTAMPS", "off"),
+        help="Add timestamps in TXT output (paragraph mode). 'start' -> [mm:ss], 'range' -> [mm:ss - mm:ss]",
+    )
+    parser.add_argument(
         "--max-gap",
         type=float,
         default=float(os.getenv("MAX_GAP", 1.0)),
@@ -91,6 +97,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=(int(os.getenv("NUM_SPEAKERS")) if os.getenv("NUM_SPEAKERS") else None),
         help="Fix the number of speakers for diarization (e.g., 2)",
+    )
+    parser.add_argument(
+        "--diarize-rtf",
+        type=float,
+        default=(float(os.getenv("DIARIZE_RTF")) if os.getenv("DIARIZE_RTF") else None),
+        help="Estimated real-time factor for diarization (audio_seconds / processing_seconds) to drive progress estimates",
+    )
+    parser.add_argument(
+        "--diarize-progress",
+        choices=["estimate", "elapsed", "off"],
+        default=os.getenv("DIARIZE_PROGRESS", "estimate"),
+        help="Diarization progress display: estimate (ETA), elapsed-only, or off",
     )
     parser.add_argument(
         "--hf-token",
@@ -175,6 +193,21 @@ def hms(seconds: float) -> str:
     return f"{h:02}:{m:02}:{s:02}"
 
 
+def ts_label(seconds: float) -> str:
+    # mm:ss if under 1h, else hh:mm:ss
+    if seconds is None:
+        seconds = 0.0
+    seconds = max(0.0, float(seconds))
+    total = int(seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h > 0:
+        return f"{h:02}:{m:02}:{s:02}"
+    else:
+        return f"{m:02}:{s:02}"
+
+
 def configure_quiet(no_warnings: bool) -> None:
     if not no_warnings:
         return
@@ -244,7 +277,7 @@ def _group_paragraphs(segments, *, max_gap: float, max_sec: float, min_chars: in
     return groups
 
 
-def format_output(segments, fmt: str, *, txt_grouping: str, max_gap: float, max_sec: float, min_chars: int, diarized: bool, speaker_prefix: str):
+def format_output(segments, fmt: str, *, txt_grouping: str, max_gap: float, max_sec: float, min_chars: int, diarized: bool, speaker_prefix: str, txt_timestamps: str = "off"):
     if fmt == "txt":
         if txt_grouping == "none":
             return " ".join(seg.text.strip() for seg in segments if seg.text and seg.text.strip())
@@ -261,7 +294,14 @@ def format_output(segments, fmt: str, *, txt_grouping: str, max_gap: float, max_
             )
             lines = []
             for g in groups:
-                prefix = f"{speaker_prefix} {g['speaker']}: " if diarized and g.get("speaker") is not None else ""
+                ts = ""
+                if txt_timestamps != "off":
+                    if txt_timestamps == "range":
+                        ts = f"[{ts_label(g.get('start'))} - {ts_label(g.get('end'))}] "
+                    else:  # start
+                        ts = f"[{ts_label(g.get('start'))}] "
+                spk = f"{speaker_prefix} {g['speaker']}: " if diarized and g.get("speaker") is not None else ""
+                prefix = f"{ts}{spk}"
                 lines.append(prefix + g["text"].strip())
             return "\n\n".join(lines) + ("\n" if lines else "")
     elif fmt == "srt":
@@ -440,7 +480,134 @@ def main() -> int:
             call_kwargs = {}
             if args.num_speakers is not None:
                 call_kwargs["num_speakers"] = int(args.num_speakers)
+            # Rough progress estimation thread using an RTF guess
+            stop_evt = None
+            prog_thread = None
+            t_dia_start = time.time()
+            # Determine duration to diarize
+            dia_dur = total_dur
+            if dia_dur <= 0 and os.path.exists(audio_path):
+                try:
+                    import soundfile as sf  # type: ignore
+                    with sf.SoundFile(audio_path) as sfh:
+                        dia_dur = float(len(sfh)) / float(sfh.samplerate)
+                except Exception:
+                    dia_dur = 0.0
+
+            def start_dia_progress():
+                nonlocal stop_evt, prog_thread
+                if not args.progress or dia_dur <= 0:
+                    return
+                from threading import Event, Thread
+                is_tty = sys.stderr.isatty()
+
+                mode = (args.diarize_progress or "estimate").lower()
+                if mode == "off":
+                    return
+
+                stop_evt = Event()
+
+                if mode == "elapsed":
+                    def worker_elapsed():
+                        last = 0.0
+                        while not stop_evt.is_set():
+                            now = time.time()
+                            if not is_tty and (now - last) < args.progress_interval:
+                                time.sleep(0.1)
+                                continue
+                            elapsed = now - t_dia_start
+                            msg = f"[DIA] elapsed {hms(elapsed)}"
+                            if is_tty:
+                                sys.stderr.write("\r" + msg)
+                                sys.stderr.flush()
+                            else:
+                                print(msg, file=sys.stderr)
+                            last = now
+                            time.sleep(0.2)
+
+                    prog_thread = Thread(target=worker_elapsed, daemon=True)
+                    prog_thread.start()
+
+                    def finish():
+                        try:
+                            if stop_evt:
+                                stop_evt.set()
+                            if prog_thread:
+                                prog_thread.join(timeout=1.0)
+                        except Exception:
+                            pass
+                    return finish
+
+                # default: estimate mode using RTF
+                import json as _json
+                cache_base = os.getenv("PYANNOTE_CACHE") or os.path.join(os.getenv("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "pyannote")
+                os.makedirs(cache_base, exist_ok=True)
+                rtf_file = os.path.join(cache_base, "diarize_rtf.json")
+
+                rtf_guess = args.diarize_rtf if args.diarize_rtf else None
+                if rtf_guess is None:
+                    try:
+                        with open(rtf_file, "r", encoding="utf-8") as f:
+                            data = _json.load(f)
+                            rtf_guess = float(data.get("rtf", 0.3))
+                    except Exception:
+                        rtf_guess = 0.3  # conservative default
+
+                expected = dia_dur / max(rtf_guess, 1e-6)
+
+                def worker_estimate():
+                    last = 0.0
+                    while not stop_evt.is_set():
+                        now = time.time()
+                        elapsed = now - t_dia_start
+                        if not is_tty and (now - last) < args.progress_interval:
+                            time.sleep(0.1)
+                            continue
+                        frac = min(0.99, max(0.0, elapsed / max(expected, 1e-6)))
+                        percent = int(frac * 100)
+                        eta = max(0.0, expected - elapsed)
+                        msg = f"[DIA {percent:3d}%] {hms(min(elapsed*rtf_guess, dia_dur))}/{hms(dia_dur)} ETA {hms(eta)}"
+                        if is_tty:
+                            sys.stderr.write("\r" + msg)
+                            sys.stderr.flush()
+                        else:
+                            print(msg, file=sys.stderr)
+                        last = now
+                        time.sleep(0.2)
+
+                prog_thread = Thread(target=worker_estimate, daemon=True)
+                prog_thread.start()
+
+                # return helper to stop and persist measured RTF
+                def finish_and_save():
+                    try:
+                        if stop_evt:
+                            stop_evt.set()
+                        if prog_thread:
+                            prog_thread.join(timeout=1.0)
+                    finally:
+                        # Save updated RTF for future estimates
+                        try:
+                            elapsed = max(1e-6, time.time() - t_dia_start)
+                            rtf_actual = dia_dur / elapsed if dia_dur > 0 else rtf_guess
+                            # EMA with previous guess
+                            alpha = 0.3
+                            new_est = (1 - alpha) * rtf_guess + alpha * rtf_actual
+                            with open(rtf_file, "w", encoding="utf-8") as f:
+                                _json.dump({"rtf": float(new_est)}, f)
+                        except Exception:
+                            pass
+
+                return finish_and_save
+
+            finisher = start_dia_progress()
             diar = pipeline({"audio": audio_path}, **call_kwargs)
+            if finisher:
+                finisher()
+            if sys.stderr.isatty() and args.progress:
+                # Move to next line after TTY progress
+                sys.stderr.write("\n")
+                sys.stderr.flush()
         except Exception as e:
             print(f"Diarization failed: {e}", file=sys.stderr)
             if cleanup:
