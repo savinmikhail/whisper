@@ -675,6 +675,7 @@ def main() -> int:
         min_chars=args.min_paragraph_chars,
         diarized=diarized,
         speaker_prefix=args.speaker_prefix,
+        txt_timestamps=args.txt_timestamps,
     )
 
     if args.output:
