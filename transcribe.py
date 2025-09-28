@@ -126,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         help="Seconds between progress updates (non-TTY)",
     )
     parser.add_argument(
+        "--no-warnings",
+        action="store_true",
+        default=os.getenv("NO_WARNINGS") in {"1", "true", "yes", "on"},
+        help="Suppress third-party deprecation/info warnings",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         help="Write output to file path (otherwise prints to stdout)",
@@ -167,6 +173,30 @@ def hms(seconds: float) -> str:
     m = (total % 3600) // 60
     s = total % 60
     return f"{h:02}:{m:02}:{s:02}"
+
+
+def configure_quiet(no_warnings: bool) -> None:
+    if not no_warnings:
+        return
+    # Reduce noisy library warnings
+    import warnings
+
+    try:
+        # Common deprecation/info warnings from audio stack
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", message=r".*deprecated.*torchaudio.*")
+        warnings.filterwarnings("ignore", module=r"torchaudio(\.|$)")
+        warnings.filterwarnings("ignore", module=r"pyannote(\.|$)")
+        warnings.filterwarnings("ignore", module=r"speechbrain(\.|$)")
+    except Exception:
+        pass
+
+    # Quieten onnxruntime logs (0=verbose,1=info,2=warning,3=error,4=fatal)
+    os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
+    # Minor noise reductions
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 
 def _group_paragraphs(segments, *, max_gap: float, max_sec: float, min_chars: int, by_speaker: bool):
@@ -281,6 +311,7 @@ def format_output(segments, fmt: str, *, txt_grouping: str, max_gap: float, max_
 
 def main() -> int:
     args = parse_args()
+    configure_quiet(args.no_warnings)
 
     if not os.path.exists(args.input):
         print(f"Input not found: {args.input}", file=sys.stderr)

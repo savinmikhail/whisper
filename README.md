@@ -41,6 +41,8 @@ Makefile
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.srt" FORMAT=srt VAD=1
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.json" FORMAT=json MODEL=small LANG=ru
   make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt PROGRESS=1 PROGRESS_INTERVAL=2
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt WARN=0   # suppress deprecation/info warnings
+  make transcribe FILE="audio/interview.mp3" OUT="outputs/interview.txt" FORMAT=txt TTY=1    # single-line updating progress
 
 Speakers (Diarization)
 - Enable speaker labels with pyannote (CPU, slower, large deps):
@@ -57,6 +59,8 @@ Speakers (Diarization)
   - When diarization is enabled, the script extracts audio to a temporary 16kHz mono WAV via ffmpeg for compatibility (MP4/AAC is not directly supported by the default backend).
   - By default, TXT is formatted into readable paragraphs; set `TXT_GROUPING=segments` for line-per-segment or `TXT_GROUPING=none` for a single line.
   - Tweak paragraphing via `MAX_GAP` (default 1.0s), `MAX_PARAGRAPH_SECONDS` (30s), and `MIN_PARAGRAPH_CHARS` (80).
+  - To hide noisy library warnings, use `WARN=0` (default). To see them for debugging, set `WARN=1`.
+  - `TTY=1` allocates an interactive terminal for the container (`-it`), enabling a single updating progress line. Without it, progress prints as periodic lines.
   - Progress prints to stderr. In non-interactive runs it emits periodic lines; in a TTY it updates a single line with percentage and ETA.
 
 Notes
