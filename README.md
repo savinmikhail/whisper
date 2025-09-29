@@ -76,3 +76,7 @@ Notes
 
 CLI Help
   docker run --rm whisper-ru --help
+
+## Simple usage
+
+`make transcribe FILE="амосрм.mp4" OUT="outputs/interview.txt" FORMAT=txt SPEAKERS=1 NUM_SPEAKERS=2`
